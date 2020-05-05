@@ -57,10 +57,10 @@ using namespace std;
 
 template <int NDims>
 TSNE<NDims>::TSNE(double Perplexity, double Theta, bool Verbose, int Max_iter, bool Init, int Stop_lying_iter,
-        int Mom_switch_iter, double Momentum, double Final_momentum, double Eta, double Exaggeration_factor, int Num_threads) :
+        int Mom_switch_iter, double Momentum, double Final_momentum, double Eta, double Exaggeration_factor, int Num_threads, bool Opt_sne) :
     perplexity(Perplexity), theta(Theta), momentum(Momentum), final_momentum(Final_momentum), eta(Eta), exaggeration_factor(Exaggeration_factor),
     max_iter(Max_iter), stop_lying_iter(Stop_lying_iter), mom_switch_iter(Mom_switch_iter), num_threads(Num_threads),
-    verbose(Verbose), init(Init), exact(theta==.0) {
+    verbose(Verbose), init(Init), exact(theta==.0), opt_sne(Opt_sne) {
 
     #ifdef _OPENMP
       int threads = num_threads;
@@ -79,7 +79,24 @@ TSNE<NDims>::TSNE(double Perplexity, double Theta, bool Verbose, int Max_iter, b
 template <int NDims>
 void TSNE<NDims>::run(double* X, unsigned int N, int D, double* Y, bool distance_precomputed, double* cost, double* itercost) {
     if(N - 1 < 3 * perplexity) { Rcpp::stop("Perplexity too large for the number of data points!\n"); }
+    
+    // overrides if necessary
+    bool auto_iter = opt_sne;
+    if (auto_iter) {
+      double suggested_eta = N / exaggeration_factor;
+      if (eta == 200.) {
+        eta = round(suggested_eta);
+        if (verbose) Rprintf("optsne: The learning rate is optimized to %g.\n", eta);
+      }
+      if (eta < suggested_eta*.95 || eta > suggested_eta * 1.05) {
+        if (verbose) Rprintf("optsne: The suggested learning rate is %d.\n", int(suggested_eta));
+        if (verbose) Rprintf("       Provided value of %g is not optimal in optsne mode.\n", eta);
+      }
+      stop_lying_iter = mom_switch_iter = max_iter; // opt-sne seems to consider only one transition
+    }
+
     if (verbose) Rprintf("Using no_dims = %d, perplexity = %f, and theta = %f\n", NDims, perplexity, theta);
+
     if (verbose) Rprintf("Computing input similarities...\n");
     clock_t start = clock();
 
@@ -134,7 +151,25 @@ void TSNE<NDims>::run(double* X, unsigned int N, int D, double* Y, bool distance
 template<int NDims>
 void TSNE<NDims>::run(const int* nn_index, const double* nn_dist, unsigned int N, int K, double* Y, double* cost, double* itercost) {
     if(N - 1 < 3 * perplexity) { Rcpp::stop("Perplexity too large for the number of data points!\n"); }
-    if (verbose) Rprintf("Using no_dims = %d, perplexity = %f, and theta = %f\n", NDims, perplexity, theta);
+    
+    // overrides if necessary
+    bool auto_iter = opt_sne;
+    if (auto_iter) {
+      double suggested_eta = N / exaggeration_factor;
+      if (eta == 200.) {
+        eta = round(suggested_eta);
+        if (verbose) Rprintf("optsne: The learning rate is optimized to %g.\n", eta);
+      }
+      if (eta < suggested_eta*.95 || eta > suggested_eta * 1.05) {
+        if (verbose) Rprintf("optsne: The suggested learning rate is %d.\n", int(suggested_eta));
+        if (verbose) Rprintf("       Provided value of %g is not optimal in optsne mode.\n", eta);
+      }
+      stop_lying_iter = mom_switch_iter = max_iter; // opt-sne seems to consider only one transition
+    }
+    
+    if (verbose) Rprintf("Using no_dims = %d, perplexity = %g, theta = %g\n", NDims, perplexity, theta);
+    if (verbose) Rprintf("Using max_iter = %d, eta = %g, exaggeration = %g\n", max_iter, eta, exaggeration_factor);
+    
     if (verbose) Rprintf("Computing input similarities...\n");
     clock_t start = clock();
 
@@ -179,6 +214,18 @@ void TSNE<NDims>::trainIterations(unsigned int N, double* Y, double* cost, doubl
   float total_time=0;
   int costi = 0; //iterator for saving the total costs for the iterations
 
+  // opt-sne variables
+  bool auto_iter = opt_sne;
+  double error_prev = FLT_MAX; // to store previous iteration error value in auto_iter mode
+  double error_rc_prev = FLT_MIN; // to store previous iteration's error rate of change in auto_iter mode
+  int auto_iter_buffer_ee = 15;  // number of iters to wait before starting to monitor KLDRC for stopping EE
+  int auto_iter_buffer_run = 15; // number of iters to wait before starting to monitor KLDRC for stopping run
+  int auto_iter_pollrate_ee = 3; // Poll KLD for early exaggeration switch every N iteration(s)
+  int auto_iter_pollrate_run = 5; // After EE, poll KLD for stopping run every N iteration(s)
+  // number of iters * pollrate_ee to wait after detecting KLDRC switchpoint to make switch out of EE
+  int auto_iter_ee_switch_buffer = 2;
+  //int error_report_rate = verbose; // If verbose, report KLD every N iteration(s)
+  
 	for(int iter = 0; iter < max_iter; iter++) {
 
         // Stop lying about the P-values after a while, and switch momentum
@@ -203,12 +250,23 @@ void TSNE<NDims>::trainIterations(unsigned int N, double* Y, double* cost, doubl
         // Make solution zero-mean
         zeroMean(Y, N, NDims);
 
+        // Conditions to compute the error
+        bool need_eval_error_verbose = (iter > 0 && (iter+1) % 50 == 0) || iter == max_iter - 1;
+        bool need_eval_error_algo = false; // algo == opt-sne
+        if (auto_iter) {
+          int rate = (iter < stop_lying_iter) ? auto_iter_pollrate_ee : auto_iter_pollrate_run;
+          need_eval_error_algo = iter % rate == 0;
+        }
+        // Compute the error
+        double C = .0; // hold the error
+        if(need_eval_error_verbose || need_eval_error_algo) {
+          if(exact) C = evaluateError(P.data(), Y, N, NDims);
+          else      C = evaluateError(row_P.data(), col_P.data(), val_P.data(), Y, N, NDims, theta);  // doing approximate computation here!
+        }
+
         // Print out progress
-        if((iter > 0 && (iter+1) % 50 == 0) || iter == max_iter - 1) {
+        if(need_eval_error_verbose) {
             end = clock();
-            double C = .0;
-            if(exact) C = evaluateError(P.data(), Y, N, NDims);
-            else      C = evaluateError(row_P.data(), col_P.data(), val_P.data(), Y, N, NDims, theta);  // doing approximate computation here!
             if(iter == 0) {
                 if (verbose) Rprintf("Iteration %d: error is %f\n", iter + 1, C);
             }
@@ -217,8 +275,37 @@ void TSNE<NDims>::trainIterations(unsigned int N, double* Y, double* cost, doubl
                 if (verbose) Rprintf("Iteration %d: error is %f (50 iterations in %4.2f seconds)\n", iter+1, C, (float) (end - start) / CLOCKS_PER_SEC);
             }
             itercost[costi] = C;
-            itercost++;
-			  start = clock();
+            costi++;
+            start = clock();
+        }
+        
+        // Optimize the end of Early Exageration and Run (opt-sne)
+        if(need_eval_error_algo) {
+          double error = C;
+          double error_diff = error_prev - error;
+          double error_rc = 100*(error_prev - error) / error_prev;
+          // if in auto_iter mode, determine if need to switch out of EE or stop run
+          if (iter < stop_lying_iter) { // if in EE phase
+            if (iter > auto_iter_buffer_ee && error_rc < error_rc_prev) {
+              if (auto_iter_ee_switch_buffer < 1) {
+                // opt-sne seems to consider only one transition
+                stop_lying_iter = iter+1;
+                mom_switch_iter = iter+1;
+                if (verbose) Rprintf("optsne: Ending Early Exaggeration at iteration %d, error %f.\n", iter, error);
+              }
+              auto_iter_ee_switch_buffer--;
+            }
+          }
+          else { // else already out of EE phase and now objective is to stop run
+            if (iter > stop_lying_iter + auto_iter_buffer_run &&
+                fabs(error_diff)/auto_iter_pollrate_run < error/max_iter) {
+              // error/auto_iter_end originally
+              max_iter = iter+1;
+              if (verbose) Rprintf("optsne: Ending Run at iteration %d, error %f.\n", iter, error);
+            }
+          }
+          error_prev = error;
+          error_rc_prev = error_rc;
         }
     }
     end = clock(); total_time += (float) (end - start) / CLOCKS_PER_SEC;
@@ -231,6 +318,8 @@ void TSNE<NDims>::trainIterations(unsigned int N, double* Y, double* cost, doubl
     free(uY);
     free(gains);
     if (verbose) Rprintf("Fitting performed in %4.2f seconds.\n", total_time);
+    if (verbose && auto_iter)
+      Rprintf("optsne: Did %d total iterations with %d as early exaggeration\n", max_iter, stop_lying_iter);
     return;
 }
 

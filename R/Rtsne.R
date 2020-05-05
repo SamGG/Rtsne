@@ -40,6 +40,7 @@
 #' @param eta numeric; Learning rate (default: 200.0)
 #' @param exaggeration_factor numeric; Exaggeration factor used to multiply the P matrix in the first part of the optimization (default: 12.0)
 #' @param num_threads integer; Number of threads to use when using OpenMP, default is 1. Setting to 0 corresponds to detecting and using all available cores
+#' @param opt_sne logical; Should opt-SNE optimization applied? (default: FALSE). If eta equals 200, its default value, eta is adjusted to nrow(X)/exaggeration_factor, as recommended by the authors. opt-sne adjusts online the end of the early exaggeration part, i.e. decides the values of stop_lying_iter and mom_switch_iter. Thus, their initial values are not used. After early exaggeration, the run stops when the relative error is lower than the ratio of the error to max_iter. Increasing max_iter will reduce the relative error and increase the iterations. max_iter should be set to 5000 when using opt-sne, as the original article, rather than the default value of 1000, which appears correct, but unpolished.
 #' 
 #' @return List with the following elements:
 #' \item{Y}{Matrix containing the new representations for the objects}
@@ -72,6 +73,7 @@
 #'
 #' @references Maaten, L. Van Der, 2014. Accelerating t-SNE using Tree-Based Algorithms. Journal of Machine Learning Research, 15, p.3221-3245.
 #' @references van der Maaten, L.J.P. & Hinton, G.E., 2008. Visualizing High-Dimensional Data Using t-SNE. Journal of Machine Learning Research, 9, pp.2579-2605.
+#' @references Belkina, A.C., Ciccolella, C.O., Anno, R., Halpert, R., Spidlen, J., & Snyder-Cappione, J.E., 2019. Automated optimized parameters for T-distributed stochastic neighbor embedding improve visualization and analysis of large datasets. Nature communications, 10(1), 5415. https://doi.org/10.1038/s41467-019-13055-y
 #' 
 #' @examples
 #' iris_unique <- unique(iris) # Remove duplicates
@@ -127,7 +129,8 @@ Rtsne.default <- function(X, dims=2, initial_dims=50,
                           stop_lying_iter=ifelse(is.null(Y_init),250L,0L), 
                           mom_switch_iter=ifelse(is.null(Y_init),250L,0L), 
                           momentum=0.5, final_momentum=0.8,
-                          eta=200.0, exaggeration_factor=12.0, num_threads=1, ...) {
+                          eta=200.0, exaggeration_factor=12.0, num_threads=1, 
+                          opt_sne = FALSE, ...) {
   
   if (!is.logical(is_distance)) { stop("is_distance should be a logical variable")}
   if (!is.matrix(X)) { stop("Input X is not a matrix")}
@@ -137,7 +140,7 @@ Rtsne.default <- function(X, dims=2, initial_dims=50,
   if (!is.wholenumber(num_threads) || num_threads<0) { stop("Incorrect number of threads.")}
   tsne.args <- .check_tsne_params(nrow(X), dims=dims, perplexity=perplexity, theta=theta, max_iter=max_iter, verbose=verbose, 
         Y_init=Y_init, stop_lying_iter=stop_lying_iter, mom_switch_iter=mom_switch_iter, 
-        momentum=momentum, final_momentum=final_momentum, eta=eta, exaggeration_factor=exaggeration_factor)
+        momentum=momentum, final_momentum=final_momentum, eta=eta, exaggeration_factor=exaggeration_factor, opt_sne=opt_sne)
  
   # Check for missing values
   X <- na.fail(X)
