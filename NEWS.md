@@ -1,3 +1,7 @@
+# Rtsne 0.15.0.9001
+* optSNE implementation
+* Speed increase by adding some openmp pragma
+
 # Rtsne 0.15
 * Substantial speed increase by fixing the possible embedding dimensionalities to 1, 2 or 3
 * Clarification of the licensing of different parts of the package

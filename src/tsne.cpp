@@ -95,8 +95,9 @@ void TSNE<NDims>::run(double* X, unsigned int N, int D, double* Y, bool distance
       stop_lying_iter = mom_switch_iter = max_iter; // opt-sne seems to consider only one transition
     }
 
-    if (verbose) Rprintf("Using no_dims = %d, perplexity = %f, and theta = %f\n", NDims, perplexity, theta);
-
+    if (verbose) Rprintf("Using no_dims = %d, perplexity = %g, theta = %g\n", NDims, perplexity, theta);
+    if (verbose) Rprintf("Using max_iter = %d, eta = %g, exaggeration = %g\n", max_iter, eta, exaggeration_factor);
+    
     if (verbose) Rprintf("Computing input similarities...\n");
     clock_t start = clock();
 
@@ -443,33 +444,36 @@ double TSNE<NDims>::evaluateError(double* P, double* Y, unsigned int N, int D) {
 template <int NDims>
 double TSNE<NDims>::evaluateError(unsigned int* row_P, unsigned int* col_P, double* val_P, double* Y, unsigned int N, int D, double theta)
 {
-
-    // Get estimate of normalization term
-    SPTree<NDims>* tree = new SPTree<NDims>(Y, N);
-    double* buff = (double*) calloc(D, sizeof(double));
-    double sum_Q = .0;
-    for(unsigned int n = 0; n < N; n++) sum_Q += tree->computeNonEdgeForces(n, theta, buff);
-
-    // Loop over all edges to compute t-SNE error
-    int ind1, ind2;
-    double C = .0, Q;
-    for(unsigned int n = 0; n < N; n++) {
-        ind1 = n * D;
-        for(unsigned int i = row_P[n]; i < row_P[n + 1]; i++) {
-            Q = .0;
-            ind2 = col_P[i] * D;
-            for(int d = 0; d < D; d++) buff[d]  = Y[ind1 + d];
-            for(int d = 0; d < D; d++) buff[d] -= Y[ind2 + d];
-            for(int d = 0; d < D; d++) Q += buff[d] * buff[d];
-            Q = (1.0 / (1.0 + Q)) / sum_Q;
-            C += val_P[i] * log((val_P[i] + FLT_MIN) / (Q + FLT_MIN));
-        }
+  
+  // Get estimate of normalization term
+  SPTree<NDims>* tree = new SPTree<NDims>(Y, N);
+  double* buff = (double*) calloc(D, sizeof(double));
+  double sum_Q = .0;
+  for(unsigned int n = 0; n < N; n++) sum_Q += tree->computeNonEdgeForces(n, theta, buff);
+  
+  // Loop over all edges to compute t-SNE error
+  double C = .0;
+#ifdef _OPENMP
+  #pragma omp parallel for reduction(+:C)
+#endif
+  for(unsigned int n = 0; n < N; n++) {
+    unsigned ind1 = n * D;
+    for(unsigned int i = row_P[n]; i < row_P[n + 1]; i++) {
+      double Q = .0;
+      unsigned ind2 = col_P[i] * D;
+      for(int d = 0; d < D; d++) {
+        double b = Y[ind1 + d] - Y[ind2 + d];
+        Q += b * b;
+      }
+      Q = (1.0 / (1.0 + Q)) / sum_Q;
+      C += val_P[i] * log((val_P[i] + FLT_MIN) / (Q + FLT_MIN));
     }
-
-    // Clean up memory
-    free(buff);
-    delete tree;
-    return C;
+  }
+  
+  // Clean up memory
+  free(buff);
+  delete tree;
+  return C;
 }
 
 // Evaluate t-SNE cost function (exactly)
@@ -518,24 +522,27 @@ void TSNE<NDims>::getCost(unsigned int* row_P, unsigned int* col_P, double* val_
   double* buff = (double*) calloc(D, sizeof(double));
   double sum_Q = .0;
   for(unsigned int n = 0; n < N; n++) sum_Q += tree->computeNonEdgeForces(n, theta, buff);
-
+  
   // Loop over all edges to compute t-SNE error
-  int ind1, ind2;
-  double  Q;
+#ifdef _OPENMP
+  #pragma omp parallel for
+#endif
   for(unsigned int n = 0; n < N; n++) {
-    ind1 = n * D;
-    costs[n] = 0.0;
+    unsigned ind1 = n * D;
+    double costs_n = .0;
     for(unsigned int i = row_P[n]; i < row_P[n + 1]; i++) {
-      Q = .0;
-      ind2 = col_P[i] * D;
-      for(int d = 0; d < D; d++) buff[d]  = Y[ind1 + d];
-      for(int d = 0; d < D; d++) buff[d] -= Y[ind2 + d];
-      for(int d = 0; d < D; d++) Q += buff[d] * buff[d];
+      double Q = .0;
+      unsigned ind2 = col_P[i] * D;
+      for(int d = 0; d < D; d++) {
+        double b = Y[ind1 + d] - Y[ind2 + d];
+        Q += b * b;
+      }
       Q = (1.0 / (1.0 + Q)) / sum_Q;
-      costs[n] += val_P[i] * log((val_P[i] + FLT_MIN) / (Q + FLT_MIN));
+      costs_n += val_P[i] * log((val_P[i] + FLT_MIN) / (Q + FLT_MIN));
     }
+    costs[n] = costs_n;
   }
-
+  
   // Clean up memory
   free(buff);
   delete tree;
@@ -787,7 +794,7 @@ void TSNE<NDims>::symmetrizeMatrix(unsigned int N) {
             // Check whether element (col_P[i], n) is present
             bool present = false;
             for(unsigned int m = row_P[col_P[i]]; m < row_P[col_P[i] + 1]; m++) {
-                if(col_P[m] == n) present = true;
+                if(col_P[m] == n) { present = true; break; }
             }
             if(present) row_counts[n]++;
             else {
@@ -939,7 +946,7 @@ double TSNE<NDims>::randn() {
 	} while((radius >= 1.0) || (radius == 0.0));
 	radius = sqrt(-2 * log(radius) / radius);
 	x *= radius;
-	y *= radius;
+	//y *= radius;
 	return x;
 }
 
